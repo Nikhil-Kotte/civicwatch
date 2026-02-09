@@ -1,0 +1,43 @@
+services:
+  - type: web
+    name: civicwatch-backend
+    rootDir: backend
+    env: docker
+    dockerfilePath: ./Dockerfile
+    plan: free
+    autoDeploy: true
+    envVars:
+      - key: SUPABASE_URL
+        sync: false
+      - key: SUPABASE_SERVICE_ROLE_KEY
+        sync: false
+      - key: SUPABASE_STORAGE_BUCKET
+        value: reports
+      - key: YOLO_SERVICE_URL
+        sync: false
+      - key: PATHWAY_SERVICE_URL
+        sync: false
+
+  - type: web
+    name: civicwatch-yolo
+    rootDir: services/yolo
+    env: docker
+    dockerfilePath: ./Dockerfile
+    plan: free
+    autoDeploy: true
+    envVars:
+      - key: YOLO_MODEL_PATH
+        value: yolo11n.pt
+      - key: YOLO_CONF
+        value: "0.25"
+
+  - type: web
+    name: civicwatch-pathway
+    rootDir: services/pathway
+    env: docker
+    dockerfilePath: ./Dockerfile
+    plan: free
+    autoDeploy: true
+    envVars:
+      - key: PATHWAY_RETENTION_MINUTES
+        value: "120"

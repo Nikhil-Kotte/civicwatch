@@ -1,0 +1,9 @@
+{
+  "scripts": {
+    "backend": "cd backend && bun run dev",
+    "backend:tunnel": "cd backend && bun run dev:tunnel",
+    "app": "cd frontend && bun run dev",
+    "dev": "npm-run-all --parallel backend app",
+    "dev:tunnel": "echo '🚀 Starting backend with ngrok...' && npm run backend:tunnel && echo '\n📱 Now run: npm run app (in a new terminal)'"
+  }
+}
