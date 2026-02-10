@@ -1,19 +1,49 @@
-import express from 'express';
-import axios from 'axios';
+import { Hono } from 'hono';
+import { env } from '../env';
 
-const router = express.Router();
+const ai = new Hono();
 
-// Update the endpoint URL
-const endpointUrl = 'https://civicwatch-backend-p7or.onrender.com/classify';
+ai.post('/classify', async (c) => {
+    const contentType = c.req.header('content-type') ?? '';
+    const yoloUrl = `${env.YOLO_SERVICE_URL}/detect`;
 
-router.post('/classify', async (req, res) => {
-    try {
-        const response = await axios.post(endpointUrl, req.body);
-        res.status(200).json(response.data);
-    } catch (error) {
-        console.error('Error occurred while classifying:', error.message); // Log the error message
-        res.status(500).json({ message: 'An error occurred while processing your request.', error: error.message });
+    let response: Response | null = null;
+
+    if (contentType.includes('multipart/form-data')) {
+        const body = await c.req.parseBody();
+        const file = body?.file;
+
+        if (!(file instanceof File)) {
+            return c.json({ error: 'No file uploaded.' }, 400);
+        }
+
+        const form = new FormData();
+        form.append('file', file, file.name || 'upload.jpg');
+
+        response = await fetch(yoloUrl, {
+            method: 'POST',
+            body: form,
+        });
+    } else {
+        const payload = await c.req.json().catch(() => null);
+        if (!payload?.imageUrl) {
+            return c.json({ error: 'imageUrl is required.' }, 400);
+        }
+
+        response = await fetch(yoloUrl, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ image_url: payload.imageUrl }),
+        });
     }
+
+    if (!response.ok) {
+        const message = await response.text();
+        return c.json({ error: `YOLO service error: ${message}` }, 502);
+    }
+
+    const result = await response.json();
+    return c.json(result);
 });
 
-export default router;
+export default ai;
