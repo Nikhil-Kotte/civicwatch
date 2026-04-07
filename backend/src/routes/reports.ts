@@ -1,6 +1,17 @@
+import { zValidator } from '@hono/zod-validator';
 import { Hono } from 'hono';
+import { z } from 'zod';
 import { env } from '../env';
 import { supabase, storageBucket } from '../supabase';
+import {
+  DUPLICATE_BBOX_DELTA,
+  DUPLICATE_RADIUS_KM,
+  RESOLUTION_CONFIDENCE_THRESHOLD,
+  daysOpen,
+  escalationLevel,
+  haversineKm,
+  urgencyScore,
+} from '../utils';
 
 const reports = new Hono();
 
@@ -11,58 +22,37 @@ function makeTicketId() {
   return `CIM-${suffix}`;
 }
 
-const SEVERITY_WEIGHT: Record<string, number> = {
-  low: 1,
-  medium: 2,
-  high: 3,
-  urgent: 4,
-};
+const REPORT_CATEGORIES = [
+  'pothole',
+  'garbage',
+  'broken_streetlight',
+  'damaged_road',
+  'water_leak',
+  'other',
+] as const;
 
-function daysOpen(createdAt?: string | null) {
-  if (!createdAt) {
-    return 0;
-  }
-  const created = new Date(createdAt).getTime();
-  if (Number.isNaN(created)) {
-    return 0;
-  }
-  return Math.max(0, Math.floor((Date.now() - created) / (24 * 60 * 60 * 1000)));
-}
+const REPORT_STATUSES = ['submitted', 'in_progress', 'resolved'] as const;
+const SEVERITY_LEVELS = ['low', 'medium', 'high', 'urgent'] as const;
 
-function escalationLevel(status: string, createdAt?: string | null) {
-  if (status === 'resolved') {
-    return 'resolved';
-  }
-  const openDays = daysOpen(createdAt);
-  if (openDays >= 7) {
-    return 'urgent';
-  }
-  if (openDays >= 3) {
-    return 'firm';
-  }
-  return 'polite';
-}
+const createReportSchema = z.object({
+  title: z.string().min(3).max(200),
+  description: z.string().max(2000).optional().default(''),
+  category: z.enum(REPORT_CATEGORIES),
+  severity: z.enum(SEVERITY_LEVELS),
+  status: z.enum(REPORT_STATUSES).optional().default('submitted'),
+  ticketId: z.string().optional(),
+  imageUrl: z.string().url().nullable().optional(),
+  imagePath: z.string().nullable().optional(),
+  latitude: z.number().min(-90).max(90),
+  longitude: z.number().min(-180).max(180),
+  address: z.string().min(1).max(500),
+  userId: z.string().uuid().nullable().optional(),
+  userName: z.string().max(100).nullable().optional(),
+});
 
-function urgencyScore(report: DbReport) {
-  const severity = SEVERITY_WEIGHT[report.severity] ?? 1;
-  const openDays = daysOpen(report.created_at);
-  const base = severity * 10 + Math.min(openDays, 14) * 2 + (report.upvotes ?? 0);
-  if (report.status === 'resolved') {
-    return Math.round(base * 0.2);
-  }
-  return Math.round(base);
-}
-
-function haversineKm(lat1: number, lon1: number, lat2: number, lon2: number) {
-  const toRad = (value: number) => (value * Math.PI) / 180;
-  const dLat = toRad(lat2 - lat1);
-  const dLon = toRad(lon2 - lon1);
-  const a =
-    Math.sin(dLat / 2) * Math.sin(dLat / 2) +
-    Math.cos(toRad(lat1)) * Math.cos(toRad(lat2)) *
-    Math.sin(dLon / 2) * Math.sin(dLon / 2);
-  return 6371 * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
-}
+const updateStatusSchema = z.object({
+  status: z.enum(REPORT_STATUSES),
+});
 
 function mapReport(row: DbReport) {
   return {
@@ -101,120 +91,118 @@ async function findDuplicateMaster(
   latitude: number,
   longitude: number
 ): Promise<{ id: string; distanceKm: number } | null> {
-  const delta = 0.0025;
   const { data, error } = await supabase
     .from('reports')
     .select('id, latitude, longitude')
     .eq('category', category)
     .neq('status', 'resolved')
-    .gte('latitude', latitude - delta)
-    .lte('latitude', latitude + delta)
-    .gte('longitude', longitude - delta)
-    .lte('longitude', longitude + delta)
+    .gte('latitude', latitude - DUPLICATE_BBOX_DELTA)
+    .lte('latitude', latitude + DUPLICATE_BBOX_DELTA)
+    .gte('longitude', longitude - DUPLICATE_BBOX_DELTA)
+    .lte('longitude', longitude + DUPLICATE_BBOX_DELTA)
     .order('created_at', { ascending: false })
     .limit(8);
 
-  if (error || !data || data.length === 0) {
-    return null;
-  }
+  if (error || !data || data.length === 0) return null;
 
   let best: { id: string; distanceKm: number } | null = null;
   for (const row of data) {
     const distanceKm = haversineKm(latitude, longitude, row.latitude, row.longitude);
-    if (distanceKm <= 0.25 && (!best || distanceKm < best.distanceKm)) {
+    if (distanceKm <= DUPLICATE_RADIUS_KM && (!best || distanceKm < best.distanceKm)) {
       best = { id: row.id, distanceKm };
     }
   }
-
   return best;
 }
 
+// GET /reports?status=&category=&userId=
 reports.get('/', async (c) => {
-  const { data, error } = await supabase
-    .from('reports')
-    .select('*')
-    .order('created_at', { ascending: false });
+  const { status, category, userId } = c.req.query();
 
-  if (error) {
-    return c.json({ error: error.message }, 500);
+  let query = supabase.from('reports').select('*').order('created_at', { ascending: false });
+
+  if (status && REPORT_STATUSES.includes(status as any)) {
+    query = query.eq('status', status);
   }
+  if (category && REPORT_CATEGORIES.includes(category as any)) {
+    query = query.eq('category', category);
+  }
+  if (userId) {
+    query = query.eq('user_id', userId);
+  }
+
+  const { data, error } = await query;
+  if (error) return c.json({ error: error.message }, 500);
 
   return c.json((data ?? []).map(mapReport));
 });
 
 reports.get('/:id', async (c) => {
   const id = c.req.param('id');
-  const { data, error } = await supabase
-    .from('reports')
-    .select('*')
-    .eq('id', id)
-    .single();
-
-  if (error) {
-    return c.json({ error: error.message }, 404);
-  }
-
+  const { data, error } = await supabase.from('reports').select('*').eq('id', id).single();
+  if (error) return c.json({ error: error.message }, 404);
   return c.json(mapReport(data));
 });
 
-reports.post('/', async (c) => {
-  const body = await c.req.json().catch(() => null);
-  if (!body) {
-    return c.json({ error: 'Invalid JSON body.' }, 400);
-  }
+reports.post('/', zValidator('json', createReportSchema), async (c) => {
+  const body = c.req.valid('json');
 
-  const requiredFields = ['title', 'category', 'severity', 'latitude', 'longitude', 'address'];
-  const missing = requiredFields.filter((field) => body[field] === undefined || body[field] === null);
-  if (missing.length > 0) {
-    return c.json({ error: `Missing fields: ${missing.join(', ')}` }, 400);
-  }
-
-  const latitude = Number(body.latitude);
-  const longitude = Number(body.longitude);
-  const duplicateMaster = await findDuplicateMaster(body.category, latitude, longitude);
+  const duplicateMaster = await findDuplicateMaster(body.category, body.latitude, body.longitude);
 
   const insertPayload = {
-    title: String(body.title).trim(),
-    description: String(body.description ?? '').trim(),
+    title: body.title.trim(),
+    description: body.description?.trim() ?? '',
     category: body.category,
     status: body.status ?? 'submitted',
     severity: body.severity,
     ticket_id: body.ticketId ?? makeTicketId(),
     image_url: body.imageUrl ?? null,
     image_path: body.imagePath ?? null,
-    latitude,
-    longitude,
-    address: String(body.address).trim(),
+    latitude: body.latitude,
+    longitude: body.longitude,
+    address: body.address.trim(),
     user_id: body.userId ?? null,
-    user_name: body.userName ? String(body.userName).trim() : null,
+    user_name: body.userName?.trim() ?? null,
     duplicate_of: duplicateMaster?.id ?? null,
   };
 
-  const { data, error } = await supabase
-    .from('reports')
-    .insert(insertPayload)
-    .select('*')
-    .single();
-
-  if (error) {
-    return c.json({ error: error.message }, 500);
-  }
+  const { data, error } = await supabase.from('reports').insert(insertPayload).select('*').single();
+  if (error) return c.json({ error: error.message }, 500);
 
   if (duplicateMaster) {
-    const { data: master } = await supabase
-      .from('reports')
-      .select('duplicate_count')
-      .eq('id', duplicateMaster.id)
-      .single();
-    await supabase
-      .from('reports')
-      .update({ duplicate_count: (master?.duplicate_count ?? 0) + 1 })
-      .eq('id', duplicateMaster.id);
+    await supabase.rpc('increment_duplicate_count', { report_id: duplicateMaster.id }).catch(() => {
+      // Fallback: read-then-write if RPC not available
+      supabase
+        .from('reports')
+        .select('duplicate_count')
+        .eq('id', duplicateMaster.id)
+        .single()
+        .then(({ data: master }) => {
+          supabase
+            .from('reports')
+            .update({ duplicate_count: (master?.duplicate_count ?? 0) + 1 })
+            .eq('id', duplicateMaster.id);
+        });
+    });
   }
 
   void notifyPathway(data);
-
   return c.json(mapReport(data), 201);
+});
+
+reports.patch('/:id/status', zValidator('json', updateStatusSchema), async (c) => {
+  const id = c.req.param('id');
+  const { status } = c.req.valid('json');
+
+  const { data, error } = await supabase
+    .from('reports')
+    .update({ status })
+    .eq('id', id)
+    .select('*')
+    .single();
+
+  if (error) return c.json({ error: error.message }, 404);
+  return c.json(mapReport(data));
 });
 
 reports.post('/:id/upvote', async (c) => {
@@ -236,24 +224,14 @@ reports.post('/:id/upvote', async (c) => {
     .select('*')
     .single();
 
-  if (error) {
-    return c.json({ error: error.message }, 500);
-  }
-
+  if (error) return c.json({ error: error.message }, 500);
   return c.json(mapReport(data));
 });
 
 reports.post('/:id/escalation', async (c) => {
   const id = c.req.param('id');
-  const { data, error } = await supabase
-    .from('reports')
-    .select('*')
-    .eq('id', id)
-    .single();
-
-  if (error || !data) {
-    return c.json({ error: error?.message ?? 'Report not found' }, 404);
-  }
+  const { data, error } = await supabase.from('reports').select('*').eq('id', id).single();
+  if (error || !data) return c.json({ error: error?.message ?? 'Report not found' }, 404);
 
   const tone = escalationLevel(data.status, data.created_at);
   const openDays = daysOpen(data.created_at);
@@ -267,16 +245,11 @@ reports.post('/:id/escalation', async (c) => {
     tone === 'urgent'
       ? 'This is an urgent follow-up.'
       : tone === 'firm'
-      ? 'This is a firm follow-up on the unresolved issue.'
-      : 'This is a polite follow-up.';
+        ? 'This is a firm follow-up on the unresolved issue.'
+        : 'This is a polite follow-up.';
 
-  const body = `Your Address\nCity - PIN\nState\n\nDate: ${formattedDate}\n\nTo\nThe Municipal Commissioner\n<Name of Municipal Corporation>\nCity - PIN\nState\n\nSubject: ${subject}\n\nSir/Madam,\n\nI am a resident of <your area/society>. I wish to bring to your notice that ${
-    String(data.category).replace(/_/g, ' ')
-  } has been occurring since <when>.\n\nThe issue is located at ${data.address}. ${
-    data.description || 'Please refer to the report details.'
-  }\nThis has caused <impact> to residents. We have previously complained via <phone/portal> (Complaint No: ${
-    data.ticket_id
-  }) if applicable.\n\n${intro} The issue has been open for ${openDays} day(s). Kindly resolve this at the earliest.\n\nThanking you,\n\nYours faithfully,\n<Your full name>\n<Your mobile number>\n<Email, if any>`;
+  const body = `Your Address\nCity - PIN\nState\n\nDate: ${formattedDate}\n\nTo\nThe Municipal Commissioner\n<Name of Municipal Corporation>\nCity - PIN\nState\n\nSubject: ${subject}\n\nSir/Madam,\n\nI am a resident of <your area/society>. I wish to bring to your notice that ${String(data.category).replace(/_/g, ' ')} has been occurring since <when>.\n\nThe issue is located at ${data.address}. ${data.description || 'Please refer to the report details.'}\nThis has caused <impact> to residents. We have previously complained via <phone/portal> (Complaint No: ${data.ticket_id}) if applicable.\n\n${intro} The issue has been open for ${openDays} day(s). Kindly resolve this at the earliest.\n\nThanking you,\n\nYours faithfully,\n<Your full name>\n<Your mobile number>\n<Email, if any>`;
+
   return c.json({ tone, openDays, subject, body });
 });
 
@@ -300,9 +273,8 @@ reports.post('/:id/verify', async (c) => {
   if (contentType.includes('multipart/form-data')) {
     const body = await c.req.parseBody();
     const file = body?.file;
-    if (!(file instanceof File)) {
-      return c.json({ error: 'No file uploaded.' }, 400);
-    }
+    if (!(file instanceof File)) return c.json({ error: 'No file uploaded.' }, 400);
+
     const form = new FormData();
     form.append('file', file, file.name || 'after.jpg');
     const yoloResponse = await fetch(`${env.YOLO_SERVICE_URL}/detect`, {
@@ -310,29 +282,24 @@ reports.post('/:id/verify', async (c) => {
       body: form,
     });
     if (!yoloResponse.ok) {
-      const message = await yoloResponse.text();
-      return c.json({ error: `YOLO service error: ${message}` }, 502);
+      return c.json({ error: `YOLO service error: ${await yoloResponse.text()}` }, 502);
     }
-    const result = await yoloResponse.json();
-    afterDetections = result.detections ?? [];
+    afterDetections = (await yoloResponse.json()).detections ?? [];
   } else {
     const payload = await c.req.json().catch(() => null);
     afterImageUrl = payload?.afterImageUrl ?? null;
     afterImagePath = payload?.afterImagePath ?? null;
-    if (!afterImageUrl) {
-      return c.json({ error: 'afterImageUrl is required.' }, 400);
-    }
+    if (!afterImageUrl) return c.json({ error: 'afterImageUrl is required.' }, 400);
+
     const yoloResponse = await fetch(`${env.YOLO_SERVICE_URL}/detect`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ image_url: afterImageUrl }),
     });
     if (!yoloResponse.ok) {
-      const message = await yoloResponse.text();
-      return c.json({ error: `YOLO service error: ${message}` }, 502);
+      return c.json({ error: `YOLO service error: ${await yoloResponse.text()}` }, 502);
     }
-    const result = await yoloResponse.json();
-    afterDetections = result.detections ?? [];
+    afterDetections = (await yoloResponse.json()).detections ?? [];
   }
 
   const beforeResponse = await fetch(`${env.YOLO_SERVICE_URL}/detect`, {
@@ -340,14 +307,10 @@ reports.post('/:id/verify', async (c) => {
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ image_url: report.image_url }),
   });
-
   if (!beforeResponse.ok) {
-    const message = await beforeResponse.text();
-    return c.json({ error: `YOLO service error: ${message}` }, 502);
+    return c.json({ error: `YOLO service error: ${await beforeResponse.text()}` }, 502);
   }
-
-  const beforeResult = await beforeResponse.json();
-  const beforeDetections = beforeResult.detections ?? [];
+  const beforeDetections = (await beforeResponse.json()).detections ?? [];
 
   const target = String(report.category);
   const scoreFor = (detections: any[]) =>
@@ -360,7 +323,7 @@ reports.post('/:id/verify', async (c) => {
   const safeBefore = Math.max(beforeScore, 0.05);
   const drop = Math.max(0, safeBefore - afterScore);
   const resolutionConfidence = Math.min(1, drop / safeBefore);
-  const resolvedVerified = resolutionConfidence >= 0.6;
+  const resolvedVerified = resolutionConfidence >= RESOLUTION_CONFIDENCE_THRESHOLD;
 
   const { data: updated, error: updateError } = await supabase
     .from('reports')
@@ -380,22 +343,13 @@ reports.post('/:id/verify', async (c) => {
     return c.json({ error: updateError?.message ?? 'Failed to update report' }, 500);
   }
 
-  return c.json({
-    report: mapReport(updated),
-    beforeScore,
-    afterScore,
-    resolutionConfidence,
-    resolvedVerified,
-  });
+  return c.json({ report: mapReport(updated), beforeScore, afterScore, resolutionConfidence, resolvedVerified });
 });
 
 reports.post('/upload', async (c) => {
   const body = await c.req.parseBody();
   const file = body?.file;
-
-  if (!(file instanceof File)) {
-    return c.json({ error: 'No file uploaded.' }, 400);
-  }
+  if (!(file instanceof File)) return c.json({ error: 'No file uploaded.' }, 400);
 
   const extension = file.name?.split('.').pop() || 'jpg';
   const fileName = `${crypto.randomUUID()}.${extension}`;
@@ -407,25 +361,14 @@ reports.post('/upload', async (c) => {
     contentType: file.type || 'image/jpeg',
     upsert: false,
   });
-
-  if (error) {
-    return c.json({ error: error.message }, 500);
-  }
+  if (error) return c.json({ error: error.message }, 500);
 
   const { data } = supabase.storage.from(storageBucket).getPublicUrl(filePath);
-
-  return c.json({
-    path: filePath,
-    publicUrl: data.publicUrl,
-    bucket: storageBucket,
-  });
+  return c.json({ path: filePath, publicUrl: data.publicUrl, bucket: storageBucket });
 });
 
 async function notifyPathway(report: Record<string, unknown>) {
-  if (!env.PATHWAY_SERVICE_URL) {
-    return;
-  }
-
+  if (!env.PATHWAY_SERVICE_URL) return;
   try {
     await fetch(`${env.PATHWAY_SERVICE_URL}/ingest/report`, {
       method: 'POST',
@@ -433,7 +376,7 @@ async function notifyPathway(report: Record<string, unknown>) {
       body: JSON.stringify(report),
     });
   } catch {
-    // Ignore Pathway errors so report creation succeeds.
+    // Pathway notification is best-effort; report creation already succeeded.
   }
 }
 

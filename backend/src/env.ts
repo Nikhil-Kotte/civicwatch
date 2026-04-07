@@ -4,6 +4,9 @@ export const env = {
   SUPABASE_STORAGE_BUCKET: process.env.SUPABASE_STORAGE_BUCKET ?? 'reports',
   YOLO_SERVICE_URL: process.env.YOLO_SERVICE_URL ?? 'http://localhost:8001',
   PATHWAY_SERVICE_URL: process.env.PATHWAY_SERVICE_URL ?? 'http://localhost:8002',
+  // Comma-separated list of allowed CORS origins, e.g. "https://myapp.com,exp://..."
+  // Defaults to permissive in development; set explicitly in production.
+  ALLOWED_ORIGINS: process.env.ALLOWED_ORIGINS ?? '',
 };
 
 export function requireEnv(name: keyof typeof env): string {
