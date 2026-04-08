@@ -35,6 +35,16 @@ create index if not exists reports_status_idx on public.reports (status);
 create index if not exists reports_duplicate_of_idx on public.reports (duplicate_of);
 create unique index if not exists reports_ticket_id_idx on public.reports (ticket_id);
 
+-- Upvote tracking (one upvote per user per report)
+create table if not exists public.user_upvotes (
+  user_id uuid not null,
+  report_id uuid not null references public.reports (id) on delete cascade,
+  created_at timestamptz not null default now(),
+  primary key (user_id, report_id)
+);
+
+create index if not exists user_upvotes_report_id_idx on public.user_upvotes (report_id);
+
 -- Detection results
 create table if not exists public.report_detections (
   id uuid primary key default gen_random_uuid(),

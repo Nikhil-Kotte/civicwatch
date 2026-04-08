@@ -216,6 +216,29 @@ reports.patch('/:id/status', zValidator('json', updateStatusSchema), async (c) =
 
 reports.post('/:id/upvote', async (c) => {
   const id = c.req.param('id');
+
+  let userId: string | null = null;
+  try {
+    const body = await c.req.json();
+    userId = typeof body?.userId === 'string' ? body.userId : null;
+  } catch { /* no body */ }
+
+  // Prevent duplicate upvotes per user
+  if (userId) {
+    const { data: existing } = await supabase
+      .from('user_upvotes')
+      .select('user_id')
+      .eq('user_id', userId)
+      .eq('report_id', id)
+      .maybeSingle();
+
+    if (existing) {
+      const { data: current } = await supabase.from('reports').select('*').eq('id', id).single();
+      if (!current) return c.json({ error: 'Report not found' }, 404);
+      return c.json({ ...mapReport(current), alreadyUpvoted: true }, 200);
+    }
+  }
+
   const { data: current, error: fetchError } = await supabase
     .from('reports')
     .select('upvotes')
@@ -234,6 +257,11 @@ reports.post('/:id/upvote', async (c) => {
     .single();
 
   if (error) return c.json({ error: error.message }, 500);
+
+  if (userId) {
+    await supabase.from('user_upvotes').insert({ user_id: userId, report_id: id });
+  }
+
   return c.json(mapReport(data));
 });
 
