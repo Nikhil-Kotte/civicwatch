@@ -17,6 +17,14 @@ const reports = new Hono();
 
 type DbReport = Record<string, any>;
 
+async function fetchYolo(request: RequestInit) {
+  try {
+    return await fetch(`${env.YOLO_SERVICE_URL}/detect`, request);
+  } catch {
+    return null;
+  }
+}
+
 function makeTicketId() {
   const suffix = crypto.randomUUID().split('-')[0]?.toUpperCase() ?? String(Date.now());
   return `CIM-${suffix}`;
@@ -170,7 +178,8 @@ reports.post('/', zValidator('json', createReportSchema), async (c) => {
   if (error) return c.json({ error: error.message }, 500);
 
   if (duplicateMaster) {
-    await supabase.rpc('increment_duplicate_count', { report_id: duplicateMaster.id }).catch(() => {
+    const { error: rpcError } = await supabase.rpc('increment_duplicate_count', { report_id: duplicateMaster.id });
+    if (rpcError) {
       // Fallback: read-then-write if RPC not available
       supabase
         .from('reports')
@@ -183,7 +192,7 @@ reports.post('/', zValidator('json', createReportSchema), async (c) => {
             .update({ duplicate_count: (master?.duplicate_count ?? 0) + 1 })
             .eq('id', duplicateMaster.id);
         });
-    });
+    }
   }
 
   void notifyPathway(data);
@@ -277,10 +286,13 @@ reports.post('/:id/verify', async (c) => {
 
     const form = new FormData();
     form.append('file', file, file.name || 'after.jpg');
-    const yoloResponse = await fetch(`${env.YOLO_SERVICE_URL}/detect`, {
+    const yoloResponse = await fetchYolo({
       method: 'POST',
       body: form,
     });
+    if (!yoloResponse) {
+      return c.json({ error: 'YOLO service unavailable.' }, 502);
+    }
     if (!yoloResponse.ok) {
       return c.json({ error: `YOLO service error: ${await yoloResponse.text()}` }, 502);
     }
@@ -291,22 +303,28 @@ reports.post('/:id/verify', async (c) => {
     afterImagePath = payload?.afterImagePath ?? null;
     if (!afterImageUrl) return c.json({ error: 'afterImageUrl is required.' }, 400);
 
-    const yoloResponse = await fetch(`${env.YOLO_SERVICE_URL}/detect`, {
+    const yoloResponse = await fetchYolo({
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ image_url: afterImageUrl }),
     });
+    if (!yoloResponse) {
+      return c.json({ error: 'YOLO service unavailable.' }, 502);
+    }
     if (!yoloResponse.ok) {
       return c.json({ error: `YOLO service error: ${await yoloResponse.text()}` }, 502);
     }
     afterDetections = (await yoloResponse.json()).detections ?? [];
   }
 
-  const beforeResponse = await fetch(`${env.YOLO_SERVICE_URL}/detect`, {
+  const beforeResponse = await fetchYolo({
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ image_url: report.image_url }),
   });
+  if (!beforeResponse) {
+    return c.json({ error: 'YOLO service unavailable.' }, 502);
+  }
   if (!beforeResponse.ok) {
     return c.json({ error: `YOLO service error: ${await beforeResponse.text()}` }, 502);
   }

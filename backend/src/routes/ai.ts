@@ -3,10 +3,18 @@ import { env } from '../env';
 
 const ai = new Hono();
 
-ai.post('/classify', async (c) => {
-    const contentType = c.req.header('content-type') ?? '';
+async function fetchYolo(request: RequestInit) {
     const yoloUrl = `${env.YOLO_SERVICE_URL}/detect`;
 
+    try {
+        return await fetch(yoloUrl, request);
+    } catch {
+        return null;
+    }
+}
+
+ai.post('/classify', async (c) => {
+    const contentType = c.req.header('content-type') ?? '';
     let response: Response | null = null;
 
     if (contentType.includes('multipart/form-data')) {
@@ -20,7 +28,7 @@ ai.post('/classify', async (c) => {
         const form = new FormData();
         form.append('file', file, file.name || 'upload.jpg');
 
-        response = await fetch(yoloUrl, {
+        response = await fetchYolo({
             method: 'POST',
             body: form,
         });
@@ -30,11 +38,15 @@ ai.post('/classify', async (c) => {
             return c.json({ error: 'imageUrl is required.' }, 400);
         }
 
-        response = await fetch(yoloUrl, {
+        response = await fetchYolo({
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({ image_url: payload.imageUrl }),
         });
+    }
+
+    if (!response) {
+        return c.json({ error: 'YOLO service unavailable.' }, 502);
     }
 
     if (!response.ok) {

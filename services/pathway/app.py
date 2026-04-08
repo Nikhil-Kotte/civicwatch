@@ -3,7 +3,6 @@ from collections import Counter, defaultdict
 from datetime import datetime, timedelta
 from typing import Dict, List
 
-import pathway as pw
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel
 

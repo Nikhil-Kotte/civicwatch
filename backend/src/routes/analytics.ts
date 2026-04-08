@@ -5,8 +5,17 @@ import { urgencyScore } from '../utils';
 
 const analytics = new Hono();
 
+async function fetchPathway(path: string) {
+  try {
+    return await fetch(`${env.PATHWAY_SERVICE_URL}${path}`);
+  } catch {
+    return null;
+  }
+}
+
 analytics.get('/summary', async (c) => {
-  const response = await fetch(`${env.PATHWAY_SERVICE_URL}/summary`);
+  const response = await fetchPathway('/summary');
+  if (!response) return c.json({ error: 'Pathway summary unavailable.' }, 502);
   if (!response.ok) return c.json({ error: 'Pathway summary unavailable.' }, 502);
   return c.json(await response.json());
 });
@@ -14,13 +23,16 @@ analytics.get('/summary', async (c) => {
 analytics.get('/heatmap', async (c) => {
   const params = c.req.query();
   const query = new URLSearchParams(params as Record<string, string>);
-  const response = await fetch(`${env.PATHWAY_SERVICE_URL}/heatmap?${query.toString()}`);
+  const suffix = query.toString() ? `?${query.toString()}` : '';
+  const response = await fetchPathway(`/heatmap${suffix}`);
+  if (!response) return c.json({ error: 'Pathway heatmap unavailable.' }, 502);
   if (!response.ok) return c.json({ error: 'Pathway heatmap unavailable.' }, 502);
   return c.json(await response.json());
 });
 
 analytics.get('/alerts', async (c) => {
-  const response = await fetch(`${env.PATHWAY_SERVICE_URL}/alerts`);
+  const response = await fetchPathway('/alerts');
+  if (!response) return c.json({ error: 'Pathway alerts unavailable.' }, 502);
   if (!response.ok) return c.json({ error: 'Pathway alerts unavailable.' }, 502);
   return c.json(await response.json());
 });

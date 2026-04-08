@@ -1,0 +1,15 @@
+# Python environments and packages
+**/.venv/
+**/.venv*/
+**/site-packages/
+
+# Python caches
+**/__pycache__/
+*.py[cod]
+
+# Service runtime logs
+services/**/uvicorn*.log
+
+# Local agent/tooling folders
+.agents/
+.claude/

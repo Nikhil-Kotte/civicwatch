@@ -27,7 +27,7 @@ services:
     autoDeploy: true
     envVars:
       - key: YOLO_MODEL_PATH
-        value: yolo11n.pt
+        value: models/civic-issues.pt
       - key: YOLO_CONF
         value: "0.25"
 
